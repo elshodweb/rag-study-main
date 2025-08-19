@@ -2,9 +2,11 @@
 """
 Simple RAG API Server - Everything in one file
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.openapi.utils import get_openapi
+
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional
 import uvicorn
 from datetime import datetime
 import os
@@ -36,6 +38,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 LLM_MODEL = os.getenv("LLM_MODEL")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+API_TOKEN = os.getenv("API_TOKEN", "1234567890")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -43,6 +46,37 @@ app = FastAPI(
     description="API для сохранения документов и ответов на вопросы",
     version="1.0.0"
 )
+
+# Update OpenAPI schema to include security
+app.openapi_schema = None
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    
+    # Add security scheme for Authorization header
+    openapi_schema["components"]["securitySchemes"] = {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "Authorization",
+            "description": "API Token for authentication"
+        }
+    }
+    
+    # Apply security to all endpoints
+    openapi_schema["security"] = [{"ApiKeyAuth": []}]
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # Initialize RAG components
 embeddings = GoogleGenerativeAIEmbeddings(
@@ -104,6 +138,23 @@ text_splitter = RecursiveCharacterTextSplitter(
     chunk_overlap=CHUNK_OVERLAP
 )
 
+# Authentication dependency
+async def verify_token(Authorization: str = Header(None)):
+    """Verify the API token from Authorization header"""
+    if not Authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    
+    # Check if it's a Bearer token or just the token
+    if Authorization.startswith("Bearer "):
+        token = Authorization[7:]  # Remove "Bearer " prefix
+    else:
+        token = Authorization
+    
+    if token != API_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid API token")
+    
+    return token
+
 # Pydantic models
 class DocumentInput(BaseModel):
     content: str
@@ -126,11 +177,10 @@ class QuestionInput(BaseModel):
 class QuestionResponse(BaseModel):
     question: str
     answer: str
-    documents_used: List[Dict[str, str]]
 
 
 @app.post("/save-document", response_model=DocumentResponse)
-async def save_document(doc_input: DocumentInput):
+async def save_document(doc_input: DocumentInput, token: str = Depends(verify_token)):
     """Save a new document"""
     try:
         # Generate unique ID
@@ -165,7 +215,7 @@ async def save_document(doc_input: DocumentInput):
         raise HTTPException(status_code=500, detail=f"Ошибка при сохранении документа: {str(e)}")
 
 @app.post("/ask-question", response_model=QuestionResponse)
-async def ask_question(question_input: QuestionInput):
+async def ask_question(question_input: QuestionInput, token: str = Depends(verify_token)):
     """Ask a question and get answer"""
     try:
         # Build filters based on input (use only one filter at a time)
@@ -191,7 +241,6 @@ async def ask_question(question_input: QuestionInput):
             return QuestionResponse(
                 question=question_input.question,
                 answer="Извините, не удалось найти релевантные документы для ответа на ваш вопрос.",
-                documents_used=[],
             )
         
         # Combine document content with metadata
@@ -226,24 +275,9 @@ async def ask_question(question_input: QuestionInput):
         })
         answer = llm.invoke(messages)
         
-        # Prepare documents info (group by doc_id to show unique documents)
-        documents_info = []
-        seen_doc_ids = set()
-        
-        for doc in retrieved_docs:
-            doc_id = doc.metadata.get("doc_id", "N/A")
-            if doc_id not in seen_doc_ids:
-                seen_doc_ids.add(doc_id)
-                documents_info.append({
-                    "doc_id": doc_id,
-                    "name": doc.metadata.get("name", "N/A"),
-                    "organization": doc.metadata.get("organization", "N/A")
-                })
-        
         return QuestionResponse(
             question=question_input.question,
             answer=answer.content,
-            documents_used=documents_info,
         )
         
     except Exception as e:

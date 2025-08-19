@@ -4,10 +4,9 @@ Simple RAG API Server - Everything in one file
 """
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 import uvicorn
 from datetime import datetime
-import uuid
 import os
 from dotenv import load_dotenv
 
@@ -56,22 +55,7 @@ llm = ChatGoogleGenerativeAI(
     google_api_key=GEMINI_API_KEY
 )
 
-prompt = ChatPromptTemplate.from_template(
-    """
-    Ты — ИИ-помощник. Отвечай только на основе предоставленного контекста.
-    Если информации нет, напиши: "информация не найдена" на языке вопроса.
-    Правила:
-    Если ответ найден, дай чёткое и полное объяснение с цитатами из контекста.
-    Если в ответе есть HTML — удали все теги, используй Markdown.
-    Язык ответа = язык вопроса:
-        Uzbek question → answer in Uzbek.
-        Russian question → answer in Russian.
 
-    Вопрос: {question}
-    Контекст: {context}
-    Ответ:
-    """
-)
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=CHUNK_SIZE,
@@ -102,17 +86,6 @@ class QuestionResponse(BaseModel):
     answer: str
     documents_used: List[Dict[str, str]]
 
-# API endpoints
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Simple RAG API",
-        "endpoints": {
-            "save_document": "/save-document",
-            "ask_question": "/ask-question"
-        }
-    }
 
 @app.post("/save-document", response_model=DocumentResponse)
 async def save_document(doc_input: DocumentInput):
@@ -178,14 +151,37 @@ async def ask_question(question_input: QuestionInput):
                 documents_used=[],
             )
         
-        # Combine document content
-        doc_content = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        # Combine document content with metadata
+        doc_content_parts = []
+        for doc in retrieved_docs:
+            doc_info = f"name:{doc.metadata.get('name', 'N/A')}, doc_id: {doc.metadata.get('doc_id', 'N/A')},\nСодержание:\n{doc.page_content}"
+            doc_content_parts.append(doc_info)
+        
+        doc_content = "\n\n---\n\n".join(doc_content_parts)
+        
+        prompt = ChatPromptTemplate.from_template("""
+        You are an AI assistant. Answer only based on the provided context.
+        If no information is found, write: "information not found" in the question language.
+        Rules:
+        If an answer is found, give a clear and complete explanation with quotes from the context.
+        If the answer contains HTML — remove all tags, use Markdown.
+        At the end of the answer, add a list of used documents in link format, template: (name)[FRONTEND_URL/doc_id].
+        
+        Answer language = question language:
+            Uzbek question → answer in Uzbek.
+            Russian question → answer in Russian.
+
+        Question: {question}
+        Context: {context}
+        Answer:
+        """)
         
         # Generate answer
         messages = prompt.invoke({
             "question": question_input.question,
             "context": doc_content
         })
+        print(messages,'messages::')
         answer = llm.invoke(messages)
         
         # Prepare documents info (group by doc_id to show unique documents)
@@ -212,10 +208,6 @@ async def ask_question(question_input: QuestionInput):
         raise HTTPException(status_code=500, detail=f"Ошибка при обработке вопроса: {str(e)}")
 
 if __name__ == "__main__":
-    print("🚀 Starting Simple RAG API Server...")
-    print("📚 Available endpoints:")
-    print("   POST /save-document - Save documents")
-    print("   POST /ask-question - Ask questions")
     print(f"📖 API Docs: http://localhost:{PORT}/docs")
     print("=" * 50)
     

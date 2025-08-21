@@ -170,9 +170,8 @@ class DocumentResponse(BaseModel):
 
 class QuestionInput(BaseModel):
     question: str
-    doc_id: Optional[str] = None
-    name: Optional[str] = None
     organization: Optional[str] = None
+    previous_messages: Optional[str] = None
 
 class QuestionResponse(BaseModel):
     question: str
@@ -220,22 +219,51 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
     try:
         # Build filters based on input (use only one filter at a time)
         filters = {}
-        if question_input.doc_id:
-            filters["doc_id"] = question_input.doc_id
-        elif question_input.name:
-            filters["name"] = question_input.name
-        elif question_input.organization:
+        if question_input.organization:
             filters["organization"] = question_input.organization
+        
+        
+        # Rewrite question for retrieval using previous conversation if provided
+        search_query = question_input.question
+        if question_input.previous_messages:
+            rewrite_prompt = ChatPromptTemplate.from_template(
+                """
+                Reformulate the user's current question into a standalone search query using the conversation history below.
+                - Keep the language the same as the current question.
+                - Resolve pronouns and references (who/when/where/etc.).
+                - Be concise. Output ONLY the reformulated query text without quotes or extra words.
 
+                Conversation history:
+                {history}
+
+                Current question: {question}
+                Reformulated query:
+                """
+            )
+            try:
+                rewrite_messages = rewrite_prompt.invoke({
+                    "history": question_input.previous_messages,
+                    "question": question_input.question
+                })
+                rewrite_answer = llm.invoke(rewrite_messages)
+                if getattr(rewrite_answer, "content", None):
+                    candidate = rewrite_answer.content.strip()
+                    if candidate:
+                        search_query = candidate
+            except Exception:
+                # Fail open: fallback to original question
+                pass
+
+        
         # Search documents with filters
         if filters:
             retrieved_docs = vector_store.similarity_search(
-                question_input.question,
+                search_query,
                 k=3,
                 filter=filters
             )
         else:
-            retrieved_docs = vector_store.similarity_search(question_input.question, k=3)
+            retrieved_docs = vector_store.similarity_search(search_query, k=3)
         
         if not retrieved_docs:
             return QuestionResponse(
@@ -251,13 +279,16 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
         
         doc_content = "\n\n---\n\n".join(doc_content_parts)
         
+        if question_input.previous_messages:
+            doc_content += "\n\n---\n\nprevious conversations:[\n" + question_input.previous_messages + "]\n\n---\n\n"
+
         prompt = ChatPromptTemplate.from_template("""
         You are an AI assistant. Answer only based on the provided context.
         If no information is found, write: "information not found" in the question language.
         Rules:
         If an answer is found, give a clear and complete explanation with quotes from the context.
         If the answer contains HTML — remove all tags, use Markdown.
-        At the end of the answer, add a list of used documents in link format, template: [name](FRONTEND_URL.com/doc_id).
+        If the asnwer has been found in documents but not in previous conversations, add a list of used documents in link format, template: [name](FRONTEND_URL.com/doc_id) at the end of the answer.
         
         Answer language = question language:
             Uzbek question → answer in Uzbek.
@@ -267,12 +298,12 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
         Context: {context}
         Answer:
         """)
-        
         # Generate answer
         messages = prompt.invoke({
             "question": question_input.question,
             "context": doc_content
         })
+        
         answer = llm.invoke(messages)
         
         return QuestionResponse(

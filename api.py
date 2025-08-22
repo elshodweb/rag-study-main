@@ -293,6 +293,7 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
         Answer language = question language:
             Uzbek question → answer in Uzbek.
             Russian question → answer in Russian.
+            English question → answer in English.
 
         Question: {question}
         Context: {context}

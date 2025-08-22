@@ -288,7 +288,7 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
         Rules:
         If an answer is found, give a clear and complete explanation with quotes from the context.
         If the answer contains HTML — remove all tags, use Markdown.
-        If the asnwer has been found in documents but not in previous conversations, add a list of used documents in link format, template: [name](FRONTEND_URL.com/doc_id) at the end of the answer.
+        If the answer has been found in documents but not in previous conversations, add a list of used documents in link format, template: [name](FRONTEND_URL.com/doc_id) at the end of the answer. Remove repeated documents.
         
         Answer language = question language:
             Uzbek question → answer in Uzbek.
@@ -303,7 +303,7 @@ async def ask_question(question_input: QuestionInput, token: str = Depends(verif
             "question": question_input.question,
             "context": doc_content
         })
-        
+
         answer = llm.invoke(messages)
         
         return QuestionResponse(
